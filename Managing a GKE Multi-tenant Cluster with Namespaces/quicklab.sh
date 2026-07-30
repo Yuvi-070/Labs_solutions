@@ -65,8 +65,8 @@ kubectl run app-server-2 --image=quay.io/centos/centos:9 --namespace=team-a -- s
 
 kubectl run app-server-3 --image=quay.io/centos/centos:9 --namespace=team-a -- sleep infinity
 
-export KUBE_EDITOR="nano"
-kubectl edit quota test-quota --namespace=team-a
+# export KUBE_EDITOR="nano"
+# kubectl edit quota test-quota --namespace=team-a
 
 kubectl create -f cpu-mem-quota.yaml
 
