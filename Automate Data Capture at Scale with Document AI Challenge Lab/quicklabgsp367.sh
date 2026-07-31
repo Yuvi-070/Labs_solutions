@@ -1,5 +1,18 @@
+#!/bin/bash
 
+gcloud auth list
 
+# Fetch zone and region
+ZONE=$(gcloud compute project-info describe \
+  --format="value(commonInstanceMetadata.items[google-compute-default-zone])")
+REGION=$(gcloud compute project-info describe \
+  --format="value(commonInstanceMetadata.items[google-compute-default-region])")
+
+PROJECT_ID=$(gcloud config get-value project)
+
+export PROJECT_NUMBER="$(gcloud projects list \
+  --filter=$(gcloud config get-value project) \
+  --format='value(PROJECT_NUMBER)')"
 
 
 
@@ -10,7 +23,7 @@ echo "Please export the values."
 
 # Prompt user to input three regions
 read -p "Enter PROCESSOR_NAME: " PROCESSOR_NAME
-read -p "Enter REGION: " REGION
+# read -p "Enter REGION: " REGION
 
 
 
@@ -53,18 +66,52 @@ gsutil mb -c standard -l ${BUCKET_LOCATION} -b on \
 
 
 #TASK 3
-#Create a BigQuery dataset and tables
 
-bq --location="US" mk  -d \
+# Set Project ID (safe to run even if already set)
+export PROJECT_ID=$(gcloud config get-value project)
+
+# Create Cloud Storage Buckets
+gcloud storage buckets create gs://${PROJECT_ID}-input-invoices \
+    --location=us-east1 \
+    --default-storage-class=STANDARD \
+    --uniform-bucket-level-access
+
+gcloud storage buckets create gs://${PROJECT_ID}-output-invoices \
+    --location=us-east1 \
+    --default-storage-class=STANDARD \
+    --uniform-bucket-level-access
+
+gcloud storage buckets create gs://${PROJECT_ID}-archived-invoices \
+    --location=us-east1 \
+    --default-storage-class=STANDARD \
+    --uniform-bucket-level-access
+
+# Create BigQuery Dataset
+bq --location="US" mk -d \
     --description "Form Parser Results" \
     ${PROJECT_ID}:invoice_parser_results
+
+# Move to schema directory
 cd ~/documentai-pipeline-demo/scripts/table-schema/
+
+# Create BigQuery Tables
 bq mk --table \
 invoice_parser_results.doc_ai_extracted_entities \
 doc_ai_extracted_entities.json
+
 bq mk --table \
 invoice_parser_results.geocode_details \
 geocode_details.json
+
+# Verify resources
+echo "=== Buckets ==="
+gcloud storage buckets list
+
+echo "=== BigQuery Dataset ==="
+bq ls
+
+echo "=== Tables ==="
+bq ls invoice_parser_results
 
 
 #TASK 4
@@ -79,32 +126,49 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:$PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
   --role="roles/artifactregistry.reader"
 
+SERVICE_ACCOUNT=$(gcloud storage service-agent --project=$PROJECT_ID)
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member serviceAccount:$SERVICE_ACCOUNT \
+  --role roles/pubsub.publisher
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:service-$PROJECT_NUMBER@gs-project-accounts.iam.gserviceaccount.com" \
+  --role="roles/pubsub.publisher"
+
 export CLOUD_FUNCTION_LOCATION=$REGION
 
 sleep 20
 
 deploy_function() {
 gcloud functions deploy process-invoices \
---region=${CLOUD_FUNCTION_LOCATION} \
---entry-point=process_invoice \
---runtime=python39 \
---service-account=${PROJECT_ID}@appspot.gserviceaccount.com \
---source=cloud-functions/process-invoices \
---timeout=400 \
---env-vars-file=cloud-functions/process-invoices/.env.yaml \
---trigger-resource=gs://${PROJECT_ID}-input-invoices \
---trigger-event=google.storage.object.finalize \
---no-gen2
+  --gen2 \
+  --region=${CLOUD_FUNCTION_LOCATION} \
+  --entry-point=process_invoice \
+  --runtime=python313 \
+  --source=cloud-functions/process-invoices \
+  --timeout=400 \
+  --env-vars-file=cloud-functions/process-invoices/.env.yaml \
+  --trigger-resource=gs://${PROJECT_ID}-input-invoices \
+  --trigger-event=google.storage.object.finalize \
+  --service-account=$PROJECT_NUMBER-compute@developer.gserviceaccount.com \
+  --allow-unauthenticated
 }
 
 deploy_success=false
 
 while [ "$deploy_success" = false ]; do
   if deploy_function; then
-    echo "Function deployed successfully, Don't forgot to subscribe to quicklab:)(https://www.youtube.com/@quick_lab)"
+    echo -e "\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+    echo -e "\033[1;32m✅ Function deployed successfully!\033[0m"
+    echo -e "\033[1;36m🚀 Don't forget to subscribe to Quick Lab 😊\033[0m"
+    echo -e "\033[1;33m📺 https://www.youtube.com/@quick_lab\033[0m"
+    echo -e "\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
     deploy_success=true
   else
-    echo "Deployment Retrying, please subscribe to quicklab (https://www.youtube.com/@quick_lab).."
+    echo -e "\033[1;31m❌ Deployment failed. Retrying in 10 seconds...\033[0m"
+    echo -e "\033[1;35m💜 Please subscribe to Quick Lab ❤️\033[0m"
+    echo -e "\033[1;33m📺 https://www.youtube.com/@quick_lab\033[0m"
     sleep 10
   fi
 done
@@ -119,21 +183,24 @@ PROCESSOR_ID=$(curl -X GET \
   sed -E 's/.*"name": "projects\/[0-9]+\/locations\/us\/processors\/([^"]+)".*/\1/')
 
 # Export the variable
-export PROCESSOR_ID
-
+PROCESSOR_ID=$(curl -X GET \
+  -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+  -H "Content-Type: application/json" \
+  "https://documentai.googleapis.com/v1/projects/$PROJECT_ID/locations/us/processors" | \
+  grep '"name":' | \
+  sed -E 's/.*"name": "projects\/[0-9]+\/locations\/us\/processors\/([^"]+)".*/\1/')
 
 gcloud functions deploy process-invoices \
+  --gen2 \
   --region=${CLOUD_FUNCTION_LOCATION} \
   --entry-point=process_invoice \
-  --runtime=python39 \
+  --runtime=python313 \
   --source=cloud-functions/process-invoices \
   --timeout=400 \
   --trigger-resource=gs://${PROJECT_ID}-input-invoices \
   --trigger-event=google.storage.object.finalize \
   --update-env-vars=PROCESSOR_ID=${PROCESSOR_ID},PARSER_LOCATION=us,PROJECT_ID=${PROJECT_ID} \
-  --service-account=$PROJECT_NUMBER-compute@developer.gserviceaccount.com \
-  --no-gen2
-
+  --service-account=$PROJECT_NUMBER-compute@developer.gserviceaccount.com
 
 
 #Task 5. Test and validate the end-to-end solution
